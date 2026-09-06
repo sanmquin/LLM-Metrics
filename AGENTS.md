@@ -10,7 +10,7 @@ The primary educational goal is to construct a continuous dataset enabling the m
 ## Agent Guidelines & System Rules
 1. **Never edit build artifacts directly.** Always trace back to source files in `src/` or `netlify/functions/`.
 2. **Obey Dark Mode Theme:** The UI must remain cleanly designed in dark mode using Tailwind CSS dark classes (`bg-gray-950`, `text-gray-100`, etc.).
-3. **Thorough Error Tracing & Logs:** Netlify background functions must capture structured execution logs (`logs[]`) to assist in debugging Netlify background tasks and API connection failures.
+3. **Thorough Error Tracing & Backend Logging Standard:** Netlify background functions and API integrations must format execution logs with ISO timestamps, explicit severity log levels (`INFO`, `WARN`, `ERROR`), and stage identifiers (e.g., `[TIMESTAMP] [LEVEL] [STAGE] Message`). All network calls to external services like arXiv must implement exponential backoff retry mechanisms to handle rate limits (HTTP 429) gracefully and log detailed status codes, headers, and attempt counters.
 4. **Schema Synchronization:** Keep the MongoDB collection schema documentation below up to date whenever paper fields or computed metric structures change.
 5. **Quality Verification:** Always run `npm run build` and `npm test` after modifying system files.
 
@@ -75,3 +75,30 @@ export interface ArxivPaper {
 #### Collection Indexes
 - `{ arxivId: 1 }` (Unique)
 - `{ publishedDate: 1 }`
+
+---
+
+### Collection: `ingestion_jobs`
+
+#### Schema Definition (TypeScript Interface & JSON Schema)
+
+```typescript
+export interface IngestionJob {
+  _id?: ObjectId;               // Primary key automatically managed by MongoDB Atlas
+  jobId: string;                // Unique ingestion job identifier (e.g. "job_1741219200000_abc12") [INDEXED UNIQUE]
+  status: 'pending' | 'running' | 'completed' | 'failed'; // State of the background ingestion task
+  startedAt: Date;              // ISO Date when background job was triggered
+  updatedAt: Date;              // ISO Date when background job status was last updated
+  completedAt?: Date;           // ISO Date when job completed or failed
+  papersRetrieved?: number;      // Total papers fetched during job execution
+  upsertedCount?: number;        // Total newly inserted papers in MongoDB
+  modifiedCount?: number;        // Total updated existing papers in MongoDB
+  durationMs?: number;           // Job duration in milliseconds
+  error?: string;               // Error message string if task failed
+  logs: string[];               // Array of structured log strings formatted as `[TIMESTAMP] [LEVEL] [STAGE] Message`
+}
+```
+
+#### Collection Indexes
+- `{ jobId: 1 }` (Unique)
+- `{ startedAt: -1 }`
