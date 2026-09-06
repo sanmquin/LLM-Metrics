@@ -65,34 +65,81 @@ export default function App() {
     fetchMetricsAndPapers();
   }, []);
 
+  const [jobStatus, setJobStatus] = useState<string | null>(null);
+
   const triggerArxivIngestion = async () => {
     setLoading(true);
-    setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] Triggering ArXiv background ingestion function...`]);
+    setShowLogs(true);
+    const newJobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const startTimeStr = new Date().toISOString();
+    setJobStatus('running');
+
+    setLogs((prev) => [
+      ...prev,
+      `[${startTimeStr}] [INFO] [UI] Triggering ArXiv background ingestion job [${newJobId}]...`
+    ]);
 
     try {
       const res = await fetch('/.netlify/functions/fetch-arxiv-background', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: newJobId })
       });
       const data = await res.json();
 
-      if (data.logs) {
-        setLogs((prev) => [...prev, ...data.logs]);
-      } else {
-        setLogs((prev) => [
-          ...prev,
-          `[${new Date().toLocaleTimeString()}] Background function launched: ${data.message || 'Accepted'}`
-        ]);
+      if (data.logs && data.logs.length > 0) {
+        setLogs((prev) => {
+          const combined = new Set([...prev, ...data.logs]);
+          return Array.from(combined);
+        });
       }
 
-      setLastSync(new Date().toLocaleTimeString());
+      // Poll job status until completed or failed
+      let pollCount = 0;
+      const maxPolls = 30; // poll up to 60 seconds (30 * 2000ms)
 
-      setTimeout(() => {
-        fetchMetricsAndPapers();
+      const pollInterval = setInterval(async () => {
+        pollCount++;
+        try {
+          const statusRes = await fetch(`/.netlify/functions/get-job-status?jobId=${newJobId}`);
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            if (statusData.found && statusData.job) {
+              const currentJob = statusData.job;
+              setJobStatus(currentJob.status);
+
+              if (currentJob.logs && currentJob.logs.length > 0) {
+                setLogs((prev) => {
+                  const combined = new Set([...prev, ...currentJob.logs]);
+                  return Array.from(combined);
+                });
+              }
+
+              if (currentJob.status === 'completed' || currentJob.status === 'failed') {
+                clearInterval(pollInterval);
+                setLoading(false);
+                setLastSync(new Date().toLocaleTimeString());
+                fetchMetricsAndPapers();
+                return;
+              }
+            }
+          }
+        } catch (pollErr) {
+          console.warn('Job status polling error:', pollErr);
+        }
+
+        if (pollCount >= maxPolls) {
+          clearInterval(pollInterval);
+          setLoading(false);
+          setLastSync(new Date().toLocaleTimeString());
+          fetchMetricsAndPapers();
+        }
       }, 2000);
+
     } catch (error: any) {
       const msg = error?.message || 'Error executing background ingestion function';
-      setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()} ERROR] ${msg}`]);
-    } finally {
+      setLogs((prev) => [...prev, `[${new Date().toISOString()}] [ERROR] [UI] ${msg}`]);
+      setJobStatus('failed');
       setLoading(false);
     }
   };
@@ -179,9 +226,19 @@ export default function App() {
             <div>
               <p className="text-xs font-medium text-gray-400 uppercase tracking-wider">Ingestion Pipeline</p>
               <p className="text-lg font-bold text-white mt-1">Netlify Background</p>
-              <p className="text-xs text-emerald-400 flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3" /> Ready
-              </p>
+              {loading || jobStatus === 'running' ? (
+                <p className="text-xs text-amber-400 flex items-center gap-1 animate-pulse">
+                  <RefreshCw className="w-3 h-3 animate-spin" /> Ingesting Papers...
+                </p>
+              ) : jobStatus === 'failed' ? (
+                <p className="text-xs text-rose-400 flex items-center gap-1">
+                  <AlertCircle className="w-3 h-3" /> Ingestion Failed
+                </p>
+              ) : (
+                <p className="text-xs text-emerald-400 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" /> Ready
+                </p>
+              )}
             </div>
             <div className="p-3 bg-emerald-950/50 text-emerald-400 border border-emerald-800/30 rounded-lg">
               <Terminal className="w-5 h-5" />

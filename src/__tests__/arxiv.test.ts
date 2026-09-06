@@ -41,3 +41,71 @@ describe('Language Metrics Utility', () => {
     expect(metrics.avgSentenceLength).toBe(4.0);
   });
 });
+
+describe('arXiv Fetcher Retries & Error Logging', () => {
+  it('retries on HTTP 429 rate limits and succeeds if subsequent request succeeds', async () => {
+    const { fetchArxivLastDayPapers } = await import('../lib/arxiv');
+
+    let callCount = 0;
+    const mockXml = `<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/abs/2502.11111v1</id>
+        <title>Retry Test Paper</title>
+        <summary>Testing retry functionality under HTTP 429 conditions.</summary>
+      </entry>
+    </feed>`;
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, _init?: any) => {
+      callCount++;
+      if (callCount === 1) {
+        return new Response('Rate limited', {
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: { 'Retry-After': '0' }
+        });
+      }
+      return new Response(mockXml, {
+        status: 200,
+        statusText: 'OK'
+      });
+    }) as typeof fetch;
+
+    try {
+      const logs: string[] = [];
+      const result = await fetchArxivLastDayPapers(logs, { maxRetries: 2, initialDelayMs: 10 });
+
+      expect(callCount).toBe(2);
+      expect(result.papers.length).toBe(1);
+      expect(result.papers[0].arxivId).toBe('2502.11111v1');
+      expect(logs.some((l) => l.includes('429 Rate Limit exceeded'))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('throws error and captures structured error logs when all retries fail', async () => {
+    const { fetchArxivLastDayPapers } = await import('../lib/arxiv');
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      return new Response('Rate limited', {
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: { 'Retry-After': '0' }
+      });
+    }) as typeof fetch;
+
+    try {
+      const logs: string[] = [];
+      await expect(
+        fetchArxivLastDayPapers(logs, { maxRetries: 2, initialDelayMs: 5 })
+      ).rejects.toThrow();
+
+      expect(logs.some((l) => l.includes('[ERROR]'))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
