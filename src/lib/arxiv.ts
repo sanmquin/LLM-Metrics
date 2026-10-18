@@ -9,8 +9,13 @@ export interface ArxivFetchResult {
   logs: string[];
 }
 
+export function formatLogEntry(level: 'INFO' | 'WARN' | 'ERROR', stage: string, message: string): string {
+  const timestamp = new Date().toISOString();
+  return `[${timestamp}] [${level}] [${stage}] ${message}`;
+}
+
 export function parseArxivXml(xmlData: string, logs: string[] = []): ArxivPaper[] {
-  logs.push(`[ArXiv Parser] Parsing XML string (length: ${xmlData.length} chars)`);
+  logs.push(formatLogEntry('INFO', 'ArXiv Parser', `Parsing XML string (length: ${xmlData.length} chars)`));
 
   const parser = new XMLParser({
     ignoreAttributes: false,
@@ -22,13 +27,13 @@ export function parseArxivXml(xmlData: string, logs: string[] = []): ArxivPaper[
   const feed = parsed.feed || parsed['atom:feed'] || parsed;
 
   if (!feed) {
-    logs.push('[ArXiv Parser Warning] No root <feed> element found in XML');
+    logs.push(formatLogEntry('WARN', 'ArXiv Parser', 'No root <feed> element found in XML'));
     return [];
   }
 
   const entries = feed.entry || feed['atom:entry'] || [];
   const entryList = Array.isArray(entries) ? entries : [entries];
-  logs.push(`[ArXiv Parser] Found ${entryList.length} entry elements in feed`);
+  logs.push(formatLogEntry('INFO', 'ArXiv Parser', `Found ${entryList.length} entry elements in feed`));
 
   const papers: ArxivPaper[] = [];
 
@@ -106,38 +111,105 @@ export function parseArxivXml(xmlData: string, logs: string[] = []): ArxivPaper[
         papers.push(paper);
       }
     } catch (err: any) {
-      logs.push(`[ArXiv Parser Error] Failed to parse entry: ${err?.message || err}`);
+      logs.push(formatLogEntry('ERROR', 'ArXiv Parser', `Failed to parse entry: ${err?.message || err}`));
     }
   }
 
-  logs.push(`[ArXiv Parser] Successfully parsed ${papers.length} papers`);
+  logs.push(formatLogEntry('INFO', 'ArXiv Parser', `Successfully parsed ${papers.length} papers`));
   return papers;
 }
 
-export async function fetchArxivLastDayPapers(logs: string[] = []): Promise<ArxivFetchResult> {
+export interface FetchOptions {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  backoffFactor?: number;
+}
+
+export async function fetchArxivLastDayPapers(
+  logs: string[] = [],
+  options: FetchOptions = {}
+): Promise<ArxivFetchResult> {
+  const maxRetries = options.maxRetries ?? 3;
+  const initialDelayMs = options.initialDelayMs ?? 1000;
+  const backoffFactor = options.backoffFactor ?? 2;
+
   const category = 'cat:cs.AI';
-  // Query arXiv API for cs.AI sorted by submittedDate descending
   const url = `https://export.arxiv.org/api/query?search_query=${category}&start=0&max_results=50&sortBy=submittedDate&sortOrder=descending`;
 
-  logs.push(`[ArXiv Fetcher] Requesting arXiv API URL: ${url}`);
-  const response = await fetch(url);
+  logs.push(formatLogEntry('INFO', 'ArXiv Fetcher', `Requesting arXiv API URL: ${url}`));
 
-  if (!response.ok) {
-    const errText = `[ArXiv Fetcher Error] HTTP ${response.status}: ${response.statusText}`;
-    logs.push(errText);
-    throw new Error(errText);
+  let attempt = 0;
+  let delay = initialDelayMs;
+
+  while (attempt <= maxRetries) {
+    try {
+      attempt++;
+      const headers: Record<string, string> = {
+        'User-Agent': 'LLM-Metrics/1.0 (https://github.com/llm-metrics; contact: academic-bot@llm-metrics.org)',
+        'Accept': 'application/atom+xml, application/xml, text/xml'
+      };
+
+      if (attempt > 1) {
+        logs.push(formatLogEntry('INFO', 'ArXiv Fetcher', `Retry attempt ${attempt - 1}/${maxRetries} sending request...`));
+      }
+
+      const response = await fetch(url, { headers });
+
+      if (response.ok) {
+        const xmlText = await response.text();
+        logs.push(formatLogEntry('INFO', 'ArXiv Fetcher', `Received XML response of size ${xmlText.length} bytes`));
+        const papers = parseArxivXml(xmlText, logs);
+
+        return {
+          papers,
+          totalResults: papers.length,
+          rawXmlLength: xmlText.length,
+          fetchedAt: new Date().toISOString(),
+          logs
+        };
+      }
+
+      const status = response.status;
+      const statusText = response.statusText || 'Unknown Error';
+      const isRateLimit = status === 429;
+      const isServerError = status >= 500 && status < 600;
+
+      const retryAfterHeader = response.headers.get('Retry-After');
+      let retryWait = delay;
+      if (retryAfterHeader) {
+        const parsedRetry = parseInt(retryAfterHeader, 10);
+        if (!isNaN(parsedRetry)) {
+          retryWait = parsedRetry * 1000;
+        }
+      }
+
+      const errMessage = isRateLimit
+        ? `HTTP 429 Rate Limit exceeded: ${statusText}. ArXiv API query limit reached.`
+        : `HTTP ${status}: ${statusText}`;
+
+      if ((isRateLimit || isServerError) && attempt <= maxRetries) {
+        logs.push(formatLogEntry('WARN', 'ArXiv Fetcher', `${errMessage} (Attempt ${attempt}/${maxRetries + 1}). Retrying in ${retryWait}ms...`));
+        await new Promise((resolve) => setTimeout(resolve, retryWait));
+        delay *= backoffFactor;
+        continue;
+      }
+
+      logs.push(formatLogEntry('ERROR', 'ArXiv Fetcher', `Failed request with status ${status}: ${errMessage}`));
+      throw new Error(`[ArXiv Fetcher Error] HTTP ${status}: ${statusText}`);
+    } catch (err: any) {
+      if (attempt <= maxRetries && !err?.message?.startsWith('[ArXiv Fetcher Error]')) {
+        logs.push(formatLogEntry('WARN', 'ArXiv Fetcher', `Fetch exception: ${err?.message || err}. Retrying in ${delay}ms...`));
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= backoffFactor;
+        continue;
+      }
+      const finalErrMsg = err?.message || String(err);
+      if (!logs.some(l => l.includes(finalErrMsg))) {
+        logs.push(formatLogEntry('ERROR', 'ArXiv Fetcher', finalErrMsg));
+      }
+      throw err;
+    }
   }
 
-  const xmlText = await response.text();
-  logs.push(`[ArXiv Fetcher] Received XML response of size ${xmlText.length} bytes`);
-
-  const papers = parseArxivXml(xmlText, logs);
-
-  return {
-    papers,
-    totalResults: papers.length,
-    rawXmlLength: xmlText.length,
-    fetchedAt: new Date().toISOString(),
-    logs
-  };
+  throw new Error('[ArXiv Fetcher Error] Maximum retries exceeded.');
 }

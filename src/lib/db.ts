@@ -27,6 +27,20 @@ export interface MetricByDay {
   lastUpdated: string;
 }
 
+export interface IngestionJob {
+  jobId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  startedAt: Date;
+  updatedAt: Date;
+  completedAt?: Date;
+  papersRetrieved?: number;
+  upsertedCount?: number;
+  modifiedCount?: number;
+  durationMs?: number;
+  error?: string;
+  logs: string[];
+}
+
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB_NAME || 'llm_metrics';
 const COLLECTION_NAME = 'papers';
